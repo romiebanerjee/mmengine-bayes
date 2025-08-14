@@ -5,12 +5,13 @@ Read the original [README](https://github.com/open-mmlab/mmengine/blob/main/READ
 
 ## 🚀 New Features 
 
-- **Curvature objects**: New object class `mmengine.curvature.KFAC` supporting kronecker-factored Laplace posterior of a trained model
+- **Curvature objects**: New object class `mmengine.curvature.KFAC` supporting kronecker-factored Laplace posterior of a trained model 
 - **Gradient objects**: The `KFAC` objects supports kronecker-factored gradients and inner products  
 - **Loop objects**: Loop objects `FisherLoop` and `TestUncLoop` added in `mmengine/runner/loops.py`, iterators for training KFAC-fisher and testing predictive uncertainty
 - **New runner functions**: added functionalities to `mmengine/runner/runner.py`
 - **Model-agnostic**: works with any OpenMMlab model
 
+KFAC code adapted from [https://github.com/DLR-RM/curvature](https://github.com/DLR-RM/curvature)
 
 ## Installation
 
