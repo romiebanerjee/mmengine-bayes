@@ -5,6 +5,7 @@ import os
 import os.path as osp
 import pickle
 import platform
+from re import I
 import time
 import warnings
 from collections import OrderedDict
@@ -47,9 +48,10 @@ from .checkpoint import (_load_checkpoint, _load_checkpoint_to_model,
                          find_latest_checkpoint, save_checkpoint,
                          weights_to_cpu)
 from .log_processor import LogProcessor
-from .loops import EpochBasedTrainLoop, IterBasedTrainLoop, TestLoop, ValLoop
+from .loops import EpochBasedTrainLoop, IterBasedTrainLoop, TestLoop, ValLoop, TestUncLoop, FisherLoop
 from .priority import Priority, get_priority
 from .utils import _get_batch_size, set_random_seed
+from ..curvature import KFAC
 
 ConfigType = Union[Dict, Config, ConfigDict]
 ParamSchedulerType = Union[List[_ParamScheduler], Dict[str,
@@ -127,6 +129,7 @@ class Runner:
             specified. If ``ValLoop`` is built with `fp16=True``,
             ``runner.val()`` will be performed under fp16 precision.
             Defaults to None. See :meth:`build_test_loop` for more details.
+        fisher_cfg (dict, optional): A dict to build a fisher estimation loop
         auto_scale_lr (dict, Optional): Config to scale the learning rate
             automatically. It includes ``base_batch_size`` and ``enable``.
             ``base_batch_size`` is the batch size that the optimizer lr is
@@ -258,6 +261,8 @@ class Runner:
     _train_loop: Optional[Union[BaseLoop, Dict]]
     _val_loop: Optional[Union[BaseLoop, Dict]]
     _test_loop: Optional[Union[BaseLoop, Dict]]
+    _fisher_loop: Optional[Union[BaseLoop, Dict]]
+    _test_unc_loop: Optional[Union[BaseLoop, Dict]]
 
     def __init__(
         self,
@@ -269,6 +274,8 @@ class Runner:
         train_cfg: Optional[Dict] = None,
         val_cfg: Optional[Dict] = None,
         test_cfg: Optional[Dict] = None,
+        fisher_cfg: Optional[Dict] = None,
+        test_unc_cfg: Optional[Dict] = None,
         auto_scale_lr: Optional[Dict] = None,
         optim_wrapper: Optional[Union[OptimWrapper, Dict]] = None,
         param_scheduler: Optional[Union[_ParamScheduler, Dict, List]] = None,
@@ -288,7 +295,16 @@ class Runner:
         randomness: Dict = dict(seed=None),
         experiment_name: Optional[str] = None,
         cfg: Optional[ConfigType] = None,
-    ):
+        curvature_checkpoint: Optional[str]=None,
+        inverse_curvature_checkpoint: Optional[str] = None,
+        device: Optional[str]=None,
+        curvature_device: Optional[str]=None,
+        save_gpu:bool=False
+
+    ):  
+        self.device = device
+        self.kfac_device = curvature_device
+
         self._work_dir = osp.abspath(work_dir)
         mmengine.mkdir_or_exist(self._work_dir)
 
@@ -348,6 +364,21 @@ class Runner:
         self._val_loop = val_cfg
         self._val_evaluator = val_evaluator
 
+        fisher_related = [train_dataloader, fisher_cfg, optim_wrapper]
+        if not (all(item is None for item in fisher_related)
+                or all(item is not None for item in fisher_related)):
+            raise ValueError(
+                'train_dataloader, fisher_cfg, and optim_wrapper should be '
+                'either all None or not None, but got '
+                f'train_dataloader={train_dataloader}, '
+                f'fisher_cfg={fisher_cfg}, '
+                f'optim_wrapper={optim_wrapper}.')
+        self._fisher_dataloader = train_dataloader
+        self._fisher_loop = fisher_cfg
+
+        self.optim_wrapper: Optional[Union[OptimWrapper, dict]]
+        self.optim_wrapper = optim_wrapper
+
         test_related = [test_dataloader, test_cfg, test_evaluator]
         if not (all(item is None for item in test_related)
                 or all(item is not None for item in test_related)):
@@ -359,6 +390,7 @@ class Runner:
         self._test_dataloader = test_dataloader
         self._test_loop = test_cfg
         self._test_evaluator = test_evaluator
+        self._test_unc_loop = test_unc_cfg
 
         self._launcher = launcher
         if self._launcher == 'none':
@@ -447,6 +479,59 @@ class Runner:
         # dump `cfg` to `work_dir`
         self.dump_config()
 
+        self.curvature_checkpoint = curvature_checkpoint
+        self.inv_curvature_checkpoint = inverse_curvature_checkpoint
+        self._init_kfac()
+        self.save_gpu = save_gpu
+  
+
+    def _init_kfac(self):
+        """
+        Load the KFAC object on GPU
+        """
+        print('Initiating KFAC object ...')
+        
+        self.kfac = KFAC(model = self.model, device = self.kfac_device, load_from = self._load_from)
+
+        '''Load kfac weights if provided'''
+        if self.curvature_checkpoint:
+            print('Loading KFAC object from: ', self.curvature_checkpoint)
+            with open(self.curvature_checkpoint, 'rb') as f:
+                state_dict = pickle.load(f)
+                # state_dict = torch.load(f, map_location=self.kfac_device)
+
+
+            if self.inv_curvature_checkpoint:
+                print("Inverse KFAC state found: ", self.inv_curvature_checkpoint)
+                with open(self.inv_curvature_checkpoint, 'rb') as f:
+                    contents = pickle.load(f)
+                    # contents = torch.load(f, map_location = self.kfac_device)
+                
+                if isinstance(contents, dict):
+                    inv_state_dict = contents
+                    eig_vals = None
+                    eig_vecs = None
+
+                elif isinstance(contents, list):
+                    if len(contents) == 1:
+                        inv_state_dict = contents[0]
+                        eig_vals = None
+                        eig_vecs = None
+                    else:
+                        assert len(contents)==3, "expecting 3 dictionaries"
+                        print("KFAC eigenspaces found")
+                        inv_state_dict, eig_vals, eig_vecs = contents
+                else:
+                    raise ValueError("Expecting dict or list")
+            
+            else:
+                print("Inverse KFAC not found, calculating inverse ...")
+                inv_state_dict = None
+                eig_vals = None
+                eig_vecs = None
+
+            self.kfac = self.kfac.load(state_dict, inv_state_dict, eig_vals, eig_vecs)
+
     @classmethod
     def from_cfg(cls, cfg: ConfigType) -> 'Runner':
         """Build a runner from config.
@@ -468,6 +553,8 @@ class Runner:
             train_cfg=cfg.get('train_cfg'),
             val_cfg=cfg.get('val_cfg'),
             test_cfg=cfg.get('test_cfg'),
+            fisher_cfg=cfg.get('fisher_cfg'),
+            test_unc_cfg=cfg.get('test_unc_cfg'),
             auto_scale_lr=cfg.get('auto_scale_lr'),
             optim_wrapper=cfg.get('optim_wrapper'),
             param_scheduler=cfg.get('param_scheduler'),
@@ -486,6 +573,11 @@ class Runner:
             default_scope=cfg.get('default_scope', 'mmengine'),
             randomness=cfg.get('randomness', dict(seed=None)),
             experiment_name=cfg.get('experiment_name'),
+            curvature_checkpoint=cfg.get('curvature_checkpoint'),
+            inverse_curvature_checkpoint=cfg.get('inverse_curvature_checkpoint'),
+            device=cfg.get('device'),
+            curvature_device=cfg.get('curvature_device')
+            save_gpu=cfg.get('save_gpu'),
             cfg=cfg,
         )
 
@@ -610,6 +702,24 @@ class Runner:
             return self._test_loop
 
     @property
+    def fisher_loop(self):
+        """:obj:`BaseLoop`: A loop to run a Gauss-Newton estimator."""
+        if isinstance(self._fisher_loop, BaseLoop) or self._fisher_loop is None:
+            return self._fisher_loop
+        else:
+            self._fisher_loop = self.build_fisher_loop(self._fisher_loop)
+            return self._fisher_loop
+        
+    @property
+    def test_unc_loop(self):
+        """:obj:`BaseLoop`: A loop to run a Gauss-Newton estimator."""
+        if isinstance(self._test_unc_loop, BaseLoop) or self._test_unc_loop is None:
+            return self._test_unc_loop
+        else:
+            self._test_unc_loop = self.build_test_unc_loop(self._test_unc_loop)
+            return self._test_unc_loop
+
+    @property
     def train_dataloader(self):
         """The data loader for training."""
         return self.train_loop.dataloader
@@ -623,6 +733,11 @@ class Runner:
     def test_dataloader(self):
         """The data loader for testing."""
         return self.test_loop.dataloader
+    
+    @property
+    def fisher_dataloader(self):
+        """The data loader for the fisher estimation"""
+        return self.fisher_loop.dataloader
 
     @property
     def val_evaluator(self):
@@ -871,7 +986,8 @@ class Runner:
             return model
 
         # Set `export CUDA_VISIBLE_DEVICES=-1` to enable CPU training.
-        model = model.to(get_device())
+        # model = model.to(get_device())
+        model = model.to(self.device)
 
         if not self.distributed:
             self.logger.info(
@@ -1481,6 +1597,48 @@ class Runner:
             worker_init_fn=init_fn,
             **dataloader_cfg)
         return data_loader
+    
+    def build_fisher_loop(self, loop: Union[BaseLoop, Dict]) -> BaseLoop:
+        """Build fisher estimator loop.
+
+         Examples of ``loop``:
+
+            # `ValLoop` will be used
+            loop = dict()
+
+            # custom validation loop
+            loop = dict(type='CustomFisherLoop')
+
+        Args:
+            loop (BaseLoop or dict): A  loop or a dict to build
+                Fisher loop. If ``loop`` is a fisher loop object, just
+                returns itself.
+
+        Returns:
+            :obj:`BaseLoop`: Validation loop object build from ``loop``.
+        """
+        if isinstance(loop, BaseLoop):
+            return loop
+        elif not isinstance(loop, dict):
+            raise TypeError(
+                f'fisher_loop should be a Loop object or dict, but got {loop}')
+
+        loop_cfg = copy.deepcopy(loop)
+        print(loop_cfg)
+
+        if 'type' in loop_cfg:
+            loop = LOOPS.build(
+                loop_cfg,
+                default_args=dict(
+                    runner=self,
+                    dataloader=self._fisher_dataloader))
+        else:
+            loop = FisherLoop(
+                **loop_cfg,
+                runner=self,
+                dataloader=self._fisher_dataloader)  # type: ignore
+
+        return loop  # type: ignore
 
     def build_train_loop(self, loop: Union[BaseLoop, Dict]) -> BaseLoop:
         """Build training loop.
@@ -1615,6 +1773,48 @@ class Runner:
                 evaluator=self._test_evaluator)  # type: ignore
 
         return loop  # type: ignore
+    
+    def build_test_unc_loop(self, loop: Union[BaseLoop, Dict]) -> BaseLoop:
+        """Build test uncertainty loop.
+
+        Examples of ``loop``::
+
+            # `TestUncLoop` will be used
+            loop = dict()
+
+            # custom test loop
+            loop = dict(type='CustomTestLoop')
+
+        Args:
+            loop (BaseLoop or dict): A test loop or a dict to build test loop.
+                If ``loop`` is a test loop object, just returns itself.
+
+        Returns:
+            :obj:`BaseLoop`: Test loop object build from ``loop_cfg``.
+        """
+        if isinstance(loop, BaseLoop):
+            return loop
+        elif not isinstance(loop, dict):
+            raise TypeError(
+                f'test_loop should be a Loop object or dict, but got {loop}')
+
+        loop_cfg = copy.deepcopy(loop)  # type: ignore
+
+        if 'type' in loop_cfg:
+            loop = LOOPS.build(
+                loop_cfg,
+                default_args=dict(
+                    runner=self,
+                    dataloader=self._test_dataloader,
+                    evaluator=self._test_evaluator))
+        else:
+            loop = TestUncLoop(
+                **loop_cfg,
+                runner=self,
+                dataloader=self._test_dataloader,
+                evaluator=self._test_evaluator)  # type: ignore
+
+        return loop  # type: ignore
 
     def build_log_processor(
             self, log_processor: Union[LogProcessor, Dict]) -> LogProcessor:
@@ -1698,6 +1898,79 @@ class Runner:
         elif self._load_from is not None:
             self.load_checkpoint(self._load_from)
             self._has_loaded = True
+
+    def fisher(self) -> dict:
+        """ Run Gauss-Newton Estimator: return updated KFAC """
+
+        if is_model_wrapper(self.model):
+            ori_model = self.model.module
+        else:
+            ori_model = self.model
+        assert hasattr(ori_model, 'train_step'), (
+            'If you want to train your model, please make sure your model '
+            'has implemented `train_step`.')
+
+        if self._fisher_loop is None:
+            raise RuntimeError(
+                '`self._fisher_loop` should not be None when calling fisher '
+                'method. Please provide `train_dataloader`, `fisher_cfg`, '
+                '`optimizer` and `param_scheduler` arguments when '
+                'initializing runner.')
+        
+
+        self._fisher_loop = self.build_fisher_loop(
+            self._fisher_loop)  # type: ignore
+
+        # `build_optimizer` should be called before `build_param_scheduler`
+        #  because the latter depends on the former
+        self.optim_wrapper = self.build_optim_wrapper(self.optim_wrapper)
+        # Automatically scaling lr by linear scaling rule
+        self.scale_lr(self.optim_wrapper, self.auto_scale_lr)
+
+        if self.param_schedulers is not None:
+            self.param_schedulers = self.build_param_scheduler(  # type: ignore
+                self.param_schedulers)  # type: ignore
+
+        if self._val_loop is not None:
+            self._val_loop = self.build_val_loop(
+                self._val_loop)  # type: ignore
+        # TODO: add a contextmanager to avoid calling `before_run` many times
+        self.call_hook('before_run')
+
+        # initialize the model weights
+        self._init_model_weights()
+
+        # try to enable activation_checkpointing feature
+        modules = self.cfg.get('activation_checkpointing', None)
+        if modules is not None:
+            self.logger.info(f'Enabling the "activation_checkpointing" feature'
+                             f' for sub-modules: {modules}')
+            turn_on_activation_checkpointing(ori_model, modules)
+
+        # try to enable efficient_conv_bn_eval feature
+        modules = self.cfg.get('efficient_conv_bn_eval', None)
+        if modules is not None:
+            self.logger.info(f'Enabling the "efficient_conv_bn_eval" feature'
+                             f' for sub-modules: {modules}')
+            turn_on_efficient_conv_bn_eval(ori_model, modules)
+
+        # make sure checkpoint-related hooks are triggered after `before_run`
+        self.load_or_resume()
+
+        # Initiate inner count of `optim_wrapper`.
+        self.optim_wrapper.initialize_count_status(
+            self.model,
+            self._fisher_loop.iter,  # type: ignore
+            self._fisher_loop.max_iters)  # type: ignore
+
+        # Maybe compile the model according to options in self.cfg.compile
+        # This must be called **AFTER** model has been wrapped.
+        self._maybe_compile('fisher_step')
+
+        kfac_state = self.fisher_loop.run()  # type: ignore
+
+        self.call_hook('after_run')
+        return kfac_state
 
     def train(self) -> nn.Module:
         """Launch training.
@@ -1823,6 +2096,31 @@ class Runner:
         metrics = self.test_loop.run()  # type: ignore
         self.call_hook('after_run')
         return metrics
+    
+    def test_unc(self) -> dict():
+        """Launch test with unc calculation.
+
+        Returns:
+            dict: A dict of metrics on testing set.
+        """
+        # assert self.curvature_checkpoint, "KFAC weights path not provided"
+        if self._test_unc_loop is None:
+            raise RuntimeError(
+                '`self._test_loop` should not be None when calling test '
+                'method. Please provide `test_dataloader`, `test_cfg` and '
+                '`test_evaluator` arguments when initializing runner.')
+
+        self._test_unc_loop = self.build_test_unc_loop(self._test_unc_loop)  # type: ignore
+
+        self.call_hook('before_run')
+
+        # make sure checkpoint-related hooks are triggered after `before_run`
+        self.load_or_resume()
+
+        metrics = self.test_unc_loop.run(self.save_gpu)  # type: ignore
+        self.call_hook('after_run')
+        return metrics
+    
 
     def call_hook(self, fn_name: str, **kwargs) -> None:
         """Call all hooks.

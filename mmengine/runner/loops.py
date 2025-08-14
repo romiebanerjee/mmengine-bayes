@@ -3,6 +3,7 @@ import bisect
 import logging
 import time
 from typing import Dict, List, Optional, Sequence, Tuple, Union
+import os, pickle
 
 import torch
 from torch.utils.data import DataLoader
@@ -16,6 +17,14 @@ from .amp import autocast
 from .base_loop import BaseLoop
 from .utils import calc_dynamic_intervals
 
+def clear_gpu(out):
+    ''' remove a output object tensors from gpu memory'''
+
+    print('clearing output GPU tensors ..')
+    for _,v in out.items():
+        if isinstance(v.data, torch.Tensor):
+                del v.data
+    torch.cuda.empty_cache()
 
 @LOOPS.register_module()
 class EpochBasedTrainLoop(BaseLoop):
@@ -494,6 +503,425 @@ class TestLoop(BaseLoop):
             batch_idx=idx,
             data_batch=data_batch,
             outputs=outputs)
+        
+@LOOPS.register_module()
+class FisherLoop(BaseLoop):
+    """Loop for iter-based Gauss-Newton estimation of Fisher Information.
+
+    Args:
+        runner (Runner): A reference of runner.
+        dataloader (Dataloader or dict): A dataloader object or a dict to
+            build a dataloader.
+        max_iters (int): Total training iterations.
+
+    """
+
+    def __init__(
+            self,
+            runner,
+            dataloader: Union[DataLoader, Dict],
+            max_iters: int) -> None:
+        super().__init__(runner, dataloader)
+        self._max_iters = int(max_iters)
+        assert self._max_iters == max_iters, \
+            f'`max_iters` should be a integer number, but get {max_iters}'
+        self._max_epochs = 1  # for compatibility with EpochBasedTrainLoop
+        self._epoch = 0
+        self._iter = 0
+        # This attribute will be updated by `EarlyStoppingHook`
+        # when it is enabled.
+        self.stop_training = False
+        if hasattr(self.dataloader.dataset, 'metainfo'):
+            self.runner.visualizer.dataset_meta = \
+                self.dataloader.dataset.metainfo
+        else:
+            print_log(
+                f'Dataset {self.dataloader.dataset.__class__.__name__} has no '
+                'metainfo. ``dataset_meta`` in visualizer will be '
+                'None.',
+                logger='current',
+                level=logging.WARNING)
+        # get the iterator of the dataloader
+        self.dataloader_iterator = _InfiniteDataloaderIterator(self.dataloader)
+
+
+    @property
+    def max_epochs(self):
+        """int: Total epochs to train model."""
+        return self._max_epochs
+
+    @property
+    def max_iters(self):
+        """int: Total iterations to train model."""
+        return self._max_iters
+
+    @property
+    def epoch(self):
+        """int: Current epoch."""
+        return self._epoch
+
+    @property
+    def iter(self):
+        """int: Current iteration."""
+        return self._iter
+
+    def run(self) -> dict:
+        """Launch GN estimator."""
+
+        kfac_save_interval = self._max_iters/10
+
+        self.runner.call_hook('before_train')
+        # In iteration-based training loop, we treat the whole training process
+        # as a big epoch and execute the corresponding hook.
+        self.runner.call_hook('before_train_epoch')
+        if self._iter > 0:
+            print_log(
+                f'Advance dataloader {self._iter} steps to skip data '
+                'that has already been trained',
+                logger='current',
+                level=logging.WARNING)
+            for _ in range(self._iter):
+                next(self.dataloader_iterator)
+        while self._iter < self._max_iters and not self.stop_training:
+            self.runner.model.train()
+
+            data_batch = next(self.dataloader_iterator)
+            self.run_iter(data_batch)
+
+            #log progress and save kfac dictionary iterations
+            if self._iter%50 == 0:
+                print('KFAC estimation: iter = ', self._iter, '/', self._max_iters)
+
+                filename = "kfac_state_iter_latest.pkl"
+                filepath = os.path.join(self.runner.work_dir, filename)
+        
+                with open(filepath, 'wb') as f:
+                    pickle.dump(self.runner.kfac.state, f)
+
+            if self._iter%kfac_save_interval==0:
+                iter_filename = "kfac_state_iter_{}.pkl".format(self._iter)
+                iter_filepath = os.path.join(self.runner.work_dir, iter_filename)
+
+                with open(iter_filepath, 'wb') as f:
+                    pickle.dump(self.runner.kfac.state, f)
+                print("saved kfac dict to " + iter_filepath)
+
+
+        self.runner.call_hook('after_train_epoch')
+        self.runner.call_hook('after_train')
+        return self.runner.kfac.state
+
+    def run_iter(self, data_batch: Sequence[dict]) -> None:
+        """Iterate one mini-batch.
+
+        Args:
+            data_batch (Sequence[dict]): Batch of data from dataloader.
+        """
+        self.runner.call_hook(
+            'before_train_iter', batch_idx=self._iter, data_batch=data_batch)
+        # Enable gradient accumulation mode and avoid unnecessary gradient
+        # synchronization during gradient accumulation process.
+        # outputs should be a dict of loss.
+        outputs = self.runner.model.fisher_step(
+            data_batch, optim_wrapper=self.runner.optim_wrapper)
+
+        self.runner.kfac.update(log=False)
+     
+
+        self.runner.call_hook(
+            'after_train_iter',
+            batch_idx=self._iter,
+            data_batch=data_batch,
+            outputs=outputs)
+        self._iter += 1
+
+
+
+@LOOPS.register_module()
+class TestUncLoop(BaseLoop):
+    """Loop for test uncertainty.
+
+    Args:
+        runner (Runner): A reference of runner.
+        dataloader (Dataloader or dict): A dataloader object or a dict to
+            build a dataloader.
+        evaluator (Evaluator or dict or list): Used for computing metrics.
+        fp16 (bool): Whether to enable fp16 testing. Defaults to
+            False.
+    """
+
+    def __init__(self,
+                 runner,
+                 dataloader: Union[DataLoader, Dict],
+                 evaluator: Union[Evaluator, Dict, List],
+                #  fp16: bool = False
+                 ):
+        super().__init__(runner, dataloader)
+
+        if isinstance(evaluator, dict) or isinstance(evaluator, list):
+            self.evaluator = runner.build_evaluator(evaluator)  # type: ignore
+        else:
+            self.evaluator = evaluator  # type: ignore
+        if hasattr(self.dataloader.dataset, 'metainfo'):
+            self.evaluator.dataset_meta = self.dataloader.dataset.metainfo
+            self.runner.visualizer.dataset_meta = \
+                self.dataloader.dataset.metainfo
+        else:
+            print_log(
+                f'Dataset {self.dataloader.dataset.__class__.__name__} has no '
+                'metainfo. ``dataset_meta`` in evaluator, metric and '
+                'visualizer will be None.',
+                logger='current',
+                level=logging.WARNING)
+        # self.fp16 = fp16
+        self.test_loss: Dict[str, HistoryBuffer] = dict()
+
+        self.test_unc_dict = {
+            'result': [],
+            'mcglm_multi': [],
+            'mcglm_1': [],
+            'lr-glm':[],
+            'e-glm': []
+        }
+
+    def run(self, save_gpu) -> dict:
+        """Launch test."""
+        self.runner.call_hook('before_test')
+        self.runner.call_hook('before_test_epoch')
+        self.runner.kfac.model.eval()
+     
+        print('initiating eigen model ..')
+        self.runner.kfac.init_eigenmodel(eps = 1e-6)
+        self.runner.kfac.eigen_model.eval()
+
+        filename = "test_unc_data_eigen.pkl"
+        filepath = os.path.join(self.runner.work_dir, filename)
+
+        # clear test loss
+        self.test_loss.clear()
+
+        for idx, data_batch in enumerate(self.dataloader):
+            # self.mcglm_iter(idx, data_batch, save_gpu = save_gpu, eps = 1e-6, mc_samples= 10)
+            self.eglm_iter(idx, data_batch, save_gpu = save_gpu, eps = 1e-6)
+
+            allocated_mem_gb = torch.cuda.memory_allocated() / 1e9  # Approximate (1 GB ≈ 1e9 bytes)
+            print(f"Allocated GPU memory: {allocated_mem_gb:.2f} GB")
+
+            if (idx+1)%20 == 0:
+                with open(filepath, 'wb') as f:
+                    print('updating test results pickle ..')
+                    pickle.dump(self.test_unc_dict, f)
+                print("saved test results to " + filepath)
+
+
+        #compute metrics
+        # metrics = self.evaluator.evaluate(len(self.dataloader.dataset))
+        metrics = None
+
+        if self.test_loss:
+            loss_dict = _parse_losses(self.test_loss, 'test')
+            metrics.update(loss_dict)
+
+        self.runner.call_hook('after_test_epoch', metrics=metrics)
+        self.runner.call_hook('after_test')
+        return metrics
+
+    
+    @torch.no_grad()
+    def mcglm_iter(self, idx, data_batch: Sequence[dict], eps, mc_samples, save_gpu):
+        """
+        _iter(self, idx, data_batch: Sequence[dict]) -> None:
+        Iterate one mini-batch.
+
+        Args:
+            data_batch (Sequence[dict]): Batch of data from dataloader.
+            eps: epsilon value for numerical differentation
+            eig_idx: eigen direction index
+            iters: number of monte carlo iterations for weights sampling
+        """
+        self.runner.call_hook(
+            'before_test_iter', batch_idx=idx, data_batch=data_batch)
+        # predictions should be sequence of BaseDataElement
+        # with autocast(enabled=self.fp16):
+           
+        self.runner.load_checkpoint(self.runner._load_from)  #restore original model weights before every run
+        self.runner.kfac.model = self.runner.model
+
+        outputs = self.runner.kfac.model.test_step(data_batch)
+
+        outputs, self.test_loss = _update_losses(outputs, self.test_loss)
+
+        self.evaluator.process(data_samples=outputs, data_batch=data_batch)
+        self.runner.call_hook(
+            'after_test_iter',
+            batch_idx=idx,
+            data_batch=data_batch,
+            outputs=outputs)
+                
+        print('===========================================')
+        print('iter = {}/{}'.format(idx, len(self.dataloader)))
+        print('mc sample no =', mc_samples)
+        print('PRED  ', outputs[0].pred_sem_seg.data.size())
+        print('LOGITS ', outputs[0].seg_logits.data.size())
+        print('GT  ', outputs[0].gt_sem_seg.data.size())
+        print('img_path  ', outputs[0].img_path)
+        print('gt_path  ', outputs[0].seg_map_path)
+
+        if save_gpu:
+            seg_logits = outputs[0].seg_logits.data.cpu()
+        else:
+            seg_logits = outputs[0].seg_logits.data
+
+        self.test_unc_dict['result'].append(outputs[0])
+
+        outputs_cpu = {k: v.cpu() if isinstance(v.data, torch.Tensor) else v for k,v in outputs[0].items() }
+        self.test_unc_dict['result'].append(outputs_cpu)
+       
+        clear_gpu(outputs[0])
+
+
+        """Use monte-carlo predictions to calculate GLM uncertainty"""
+
+        mc_preds = []
+
+        with torch.no_grad():
+            for _ in range(mc_samples):
+                # print('sampling range ', i)
+                self.runner.kfac.sample_and_replace(eigen_index = None, eps=eps)
+                
+                outputs = self.runner.kfac.model.test_step(data_batch)
+                outputs, self.test_loss = _update_losses(outputs, self.test_loss)
+        
+                if save_gpu:
+                    mc_preds.append(outputs[0].seg_logits.data.cpu())
+                else:
+                    mc_preds.append(outputs[0].seg_logits.data)
+                  
+                
+                self.runner.load_checkpoint(self.runner._load_from)  #restore original model weights befre every run
+                self.runner.kfac.model = self.runner.model
+
+
+        seg_logits_stacked = torch.stack(mc_preds)  #pred_logits_stacked.shape = (samples,19,512,1024), 19 = no.of classes
+        print('MCLOGITS  ', seg_logits_stacked.size())
+
+        A = (seg_logits_stacked - seg_logits)/eps
+        print('A ', A.size() )
+        B = torch.matmul(A.permute(2,3,1,0), A.permute(2,3,0,1)) #B.shape = (512,1024,19,19)
+        print('B ', B.size())
+        C = B.diagonal(offset=0, dim1=-1, dim2=-2).sum(-1) #C.shape = (512,1024)
+        print('C ', C)
+
+        B1 =  torch.matmul(A[[0],:,:,:].permute(2,3,1,0), A[[0], :,:,:].permute(2,3,0,1)) #B.shape = (512,1024,19,19)
+        C1 = B1.diagonal(offset=0, dim1=-1, dim2=-2).sum(-1) #C.shape = (512,1024)
+        print('C1 ', C1)
+
+
+        """Low Rank GLM"""
+        self.runner.kfac.sample_and_replace(eigen_index = -1, eps=eps) 
+
+        outputs = self.runner.kfac.model.test_step(data_batch)
+        outputs, self.test_loss = _update_losses(outputs, self.test_loss)
+        if save_gpu:
+          seg_logits_lr = outputs[0].seg_logits.data.cpu() #(19, 512, 1024)
+        else:
+          seg_logits_lr = outputs[0].seg_logits.data #(19, 512, 1024)
+        
+        self.runner.load_checkpoint(self.runner._load_from)  #restore original model weights befre every run
+        self.runner.kfac.model = self.runner.model
+
+        A2 = (seg_logits_lr.unsqueeze_(0) - seg_logits)/eps
+        B2 = torch.matmul(A2.permute(2,3,1,0), A2.permute(2,3,0,1)) #B.shape = (512,1024,19,19)
+        C2 = B2.diagonal(offset=0, dim1=-1, dim2=-2).sum(-1) #C.shape = (512,1024)
+        print('C2 ', C2)
+        
+        clear_gpu(outputs[0])
+
+        self.test_unc_dict['mcglm_multi'].append(C)
+        self.test_unc_dict['mcglm_1'].append(C1)
+        self.test_unc_dict['lr-glm'].append(C2)
+
+
+
+    @torch.no_grad()
+    def eglm_iter(self, idx, data_batch: Sequence[dict], eps, save_gpu):
+        """
+        _iter(self, idx, data_batch: Sequence[dict]) -> None:
+        Iterate one mini-batch.
+
+        Args:
+            data_batch (Sequence[dict]): Batch of data from dataloader.
+            eps: epsilon value for numerical differentation
+
+        """
+        self.runner.call_hook(
+            'before_test_iter', batch_idx=idx, data_batch=data_batch)
+        # predictions should be sequence of BaseDataElement
+        # with autocast(enabled=self.fp16):
+
+        
+        outputs = self.runner.kfac.model.test_step(data_batch)
+        outputs, self.test_loss = _update_losses(outputs, self.test_loss)
+
+        # self.evaluator.process(data_samples=outputs, data_batch=data_batch)
+        # self.runner.call_hook(
+        #     'after_test_iter',
+        #     batch_idx=idx,
+        #     data_batch=data_batch,
+        #     outputs=outputs)
+                
+
+        print('-----iter = {}/{} -----------'.format(idx, len(self.dataloader)))
+        # print('PRED  ', outputs[0].pred_sem_seg.data.size())
+        # print('LOGITS ', outputs[0].seg_logits.data.size())
+        # print('GT  ', outputs[0].gt_sem_seg.data.size())
+        print('img_path  ', outputs[0].img_path)
+        print('gt_path  ', outputs[0].seg_map_path)
+
+        if save_gpu:
+            seg_logits = outputs[0].seg_logits.data.cpu()
+        else:
+            seg_logits = outputs[0].seg_logits.data
+
+
+        outputs_cpu = {k: v.data.cpu() if isinstance(v.data, torch.Tensor) else v for k,v in outputs[0].items() }
+        # print(outputs_cpu)
+        self.test_unc_dict['result'].append(outputs_cpu)
+
+        clear_gpu(outputs[0])
+
+        # print(outputs_cpu)
+
+        self.runner.kfac.select_and_replace(eigen_index = -1, eps=eps) 
+
+        # outputs = self.runner.kfac.eigen_model.test_step(data_batch)
+        outputs = self.runner.kfac.model.test_step(data_batch)
+        outputs, self.test_loss = _update_losses(outputs, self.test_loss)
+
+        print('--EGLM MODEL OUTPUT---')
+        print('PRED  ', outputs[0].pred_sem_seg.data.size())
+        print('LOGITS ', outputs[0].seg_logits.data.size())
+        print('GT  ', outputs[0].gt_sem_seg.data.size())
+        print('img_path  ', outputs[0].img_path)
+        print('gt_path  ', outputs[0].seg_map_path)
+
+        if save_gpu:
+            seg_logits_eig = outputs[0].seg_logits.data.cpu() #(19, h, w)
+        else:
+            seg_logits_eig =  outputs[0].seg_logits.data #(19, h, w)
+
+        self.runner.load_checkpoint(self.runner._load_from)  #restore original model weights before every run
+        self.runner.kfac.model = self.runner.model
+
+
+        A = (seg_logits_eig.unsqueeze_(0) - seg_logits)/eps
+        B = torch.matmul(A.permute(2,3,1,0), A.permute(2,3,0,1)) #B.shape = (512,1024,19,19)
+        C = B.diagonal(offset=0, dim1=-1, dim2=-2).sum(-1) #C.shape = (512,1024)
+        print('C ', C)
+
+        self.test_unc_dict['e-glm'].append(C.cpu())
+
+        clear_gpu(outputs[0])        
 
 
 def _parse_losses(losses: Dict[str, HistoryBuffer],
