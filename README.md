@@ -5,12 +5,12 @@ Read the original [README](https://github.com/open-mmlab/mmengine/blob/main/READ
 
 ## 🚀 New Features 
 
-- **Curvature objects**: New object class `mmengine.curvature.KFAC` supporting korneckde-factored Laplace posterior of a trained model
+- **Curvature objects**: New object class `mmengine.curvature.KFAC` supporting kronecker-factored Laplace posterior of a trained model
 - **Gradient objects**: The `KFAC` objects supports kronecker-factored gradients and inner products  
 - **Loop objects**: Loop objects `FisherLoop` and `TestUncLoop` added in `mmengine/runner/loops.py`, iterators for training KFAC-fisher and testing predictive uncertainty
 - **New runner functions**: added functionalities to `mmengine/runner/runner.py`
 - **Model-agnostic**: works with any OpenMMlab model
-
+r
 <!-- 👉 **Try it out**: [Live Demo Link] (if applicable)   -->
 
 ## Installation
@@ -37,10 +37,10 @@ pip install -e .
 - *Input*: `model`:model, `weights`:model_weights_dict, `kfac`:model_kfac, `kfac.state`:kf-fisher_dict, `val_loader`
 - *Iterator*: The `TestUncLoop` will iteratively calculate downstream **GLM** predictive distribution covariance, through the validation dataset, using the following methods:
     - MC-GLM: A monte-carlo estimator for GLM predictive covariance
-    - Low-rank GLM: A few-shot MC-GLM estimator
+    - MC-GLM-1: A single-shot MC-GLM estimator
     - e-GLM: A single-shot GLM-estimator using a single fisher eigen-direction in weight space 
 - *method*: `runner.test_unc()`
-
+t
 ## **Laplace-bayesian-neural-network (mathematical background)**
 
 ## 1. Overview
@@ -196,20 +196,20 @@ graph LR
 - A sample from a gaussian $z \sim N(\mu, \Sigma)$ can be obtained by first sampling $x \sim N(0, I_n)$ from an identity-covariance zero-mean Gaussian, and appling the affine transformation $z= \mu  + Chol(\Sigma)@ x$.
 - For a KFAC Laplace-BNN the covariance of the form 
   $\begin{pmatrix}
-  Q_{(1)}^{-1}\otimes H_{(1)}^{-1}&  &\\
-  & \ddots & \\
-  && Q_{(L)}^{-1} \otimes H_{(L)}^{-1}
+  Q_{(1)}^{-1}\otimes H_{(1)}^{-1}&&\\
+  &\ddots & \\
+  &&Q_{(L)}^{-1} \otimes H_{(L)}^{-1}
   \end{pmatrix}$
 - The Choleksy decomposes block-wise and commutes with inverses and kronecker products: 
   $Chol\begin{pmatrix}
-  Q_{(1)}^{-1}\otimes H_{(1)}^{-1}&  &\\
-  & \ddots & \\
-  && Q_{(L)}^{-1} \otimes H_{(L)}^{-1}
+  Q_{(1)}^{-1}\otimes H_{(1)}^{-1}&&\\
+  &\ddots& \\
+  &&Q_{(L)}^{-1} \otimes H_{(L)}^{-1}
   \end{pmatrix}$ = 
 $\begin{pmatrix}
-Chol(Q_{(1)})^{-1}\otimes Chol(H_{(1)})^{-1}& &\\
+Chol(Q_{(1)})^{-1}\otimes Chol(H_{(1)})^{-1}&&\\
 & \ddots & \\
-&& Chol(Q_{(L)})^{-1}\otimes Chol(H_{(L)})^{-1}& &\\
+&&Chol(Q_{(L)})^{-1}\otimes Chol(H_{(L)})^{-1}&&\\
 \end{pmatrix}$
 - The samples care obtained layer-wise: $z_l = \left( Ch(Q_{(1)})^{-1}\otimes Ch(H_{(1)})^{-1} \right)@ x_l$ where $x \sim N(0, I_l)$
 
