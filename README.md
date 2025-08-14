@@ -1,3 +1,36 @@
+# mmengine-bayes
+This repo is a fork of [openmmlab-mmengine](https://github.com/open-mmlab/mmengine). It adds support for training and evaluating **Laplace-approximated Bayesian models** for **pre-trained openmmlab models**.
+
+
+## 🚀 New Features 
+
+- **New loop objects**: Loop objects `FisherLoop` and `TestUncLoop` added in `mmengine/runner/loops.py`, iterators for training KFAC-fisher and testing predictive uncertainty
+- **New runner functions**: added functionalities to `mmengine/runner/runner.py`
+
+
+<!-- 👉 **Try it out**: [Live Demo Link] (if applicable)   -->
+
+## Installation
+
+```bash
+git clone https://github.com/romiebanerjee/mmengine-bayes
+cd mmengine-bayes
+pip install -e .
+```
+<!-- 
+### 📝 Key Changes  
+```diff
+// Original code (before)
+- function oldMethod() {
++ // New optimized method (my contribution)
++ function newMethod() {
+    return "Improved!";
+  }
+``` -->
+
+## Usage
+
+
 <div align="center">
   <img src="https://user-images.githubusercontent.com/58739961/187154444-fce76639-ac8d-429b-9354-c6fac64b7ef8.jpg" width="600"/>
   <div>&nbsp;</div>
