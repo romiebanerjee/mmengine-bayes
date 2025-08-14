@@ -87,8 +87,9 @@ graph LR
 A **Laplace-BNN** is BNN where the posterior is replaced by a *Gaussian around the MAP* using Laplace approximation applied to the true model posterior. The MAP is a model point-estimate obtained through ERM. 
 
 ### Laplace-BNN Inference 
-- $ P(\Theta|D) \sim N(\theta_{MAP}, \Sigma) $
-- The covariance $\Sigma$ is inverse of the Loss Hessian, $\left( \frac{\partial^2}{\partial \theta^2} Loss(\theta)|_{\theta_{MAP}} \right)^{-1}$
+- $P(\Theta|D) \sim N(\theta_{MAP}, \Sigma)$
+- The covariance $\Sigma$ is inverse of the Loss Hessian, 
+$\left( \frac{\partial^2}{\partial \theta^2} Loss(\theta)|_{\theta_{MAP}} \right)^{-1}$
 
 ```mermaid
 graph LR
@@ -98,13 +99,16 @@ graph LR
 
 ### Laplace-BNN Inference with KFAC posterior
 
-- The Hessian matrix is replaced by the Generalized-Gauss-Newton approximation, i.e. the Fisher information matrix $ I_{\theta}(\theta_{MAP}) := COV \left( \nabla_{\theta}Loss |_{\theta_{MAP}} \right)$
+- The Hessian matrix is replaced by the Generalized-Gauss-Newton approximation, i.e. the Fisher information matrix 
+$I_{\theta}(\theta_{MAP}) := COV \left( \nabla_{\theta}Loss |_{\theta_{MAP}} \right)$
 - $P(\Theta|D) \sim N(\theta_{MAP}, I_{\theta}(\theta_{MAP})^{-1})$
-- The Fisher is further approximated by the **KFAC** matrix, a *block-diagonal* form (block per layer), where each block is in a *kronecker-factored*  form $I_{\theta}(\theta_{MAP})_{KFAC} =
-  \begin{pmatrix}
+- The Fisher is further approximated by the **KFAC** matrix, a *block-diagonal* form (block per layer), where each block is in a *kronecker-factored*  form 
+$I_{\theta}(\theta_{MAP})_{KFAC}$ =
+  
+- $\begin{pmatrix}
   Q_{(1)}\otimes H_{(1)}&  &\\
   & \ddots & \\
-  && Q_{(L)} \otimes H_{(L)}
+  & & Q_{(L)} \otimes H_{(L)}
   \end{pmatrix}$
 - The l-th block $Q_l\otimes H_l$ is the Fisher for the l-th layer. 
 - The KFAC posterior covariance $\Sigma_{KFAC} = 
@@ -125,8 +129,10 @@ graph LR
 
 ### Laplace-BNN predictive: MCI estimate
 - Input $x$
-- Sample weights $\theta_1, \ldots, \theta_k \sim N\left( \theta_{MAP}, I_{\theta}(\theta_{MAP})^{-1}\right)$
-- Multiple Feed forwards $f(x, \theta_1), \ldots, f(x, \theta_k)$
+- Sample weights 
+$\theta_1, \ldots, \theta_k \sim N\left( \theta_{MAP}, I_{\theta}(\theta_{MAP})^{-1}\right)$
+- Multiple Feed forwards 
+$f(x, \theta_1), \ldots, f(x, \theta_k)$
 - Compute the predictive $P(y|x)$ statistics: empirical mean and covariance of $y_1, \ldots, y_k$
 - *NOTE*: The MCI prediction $\bar{f}(x)$ is different from $f_{MAP}(x)$, hence the Laplace-MCI predictive doesn't say anything meaningful about the prediction uncertainty the original model $f_{MAP}$.
 
