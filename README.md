@@ -1,7 +1,7 @@
 # mmengine-bayes
 This repo is a fork of [open-mmlab mmengine](https://github.com/open-mmlab/mmengine). It adds support for training and evaluating **Laplace-approximated Bayesian models** for **pre-trained openmmlab models**.
 
-Read the original [README](https://github.com/open-mmlab/mmengine/blob/main/README.md). 
+Upstream repo [README](https://github.com/open-mmlab/mmengine/blob/main/README.md). 
 
 ## 🚀 New Features 
 
