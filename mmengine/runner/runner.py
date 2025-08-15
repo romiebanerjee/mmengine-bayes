@@ -576,7 +576,7 @@ class Runner:
             curvature_checkpoint=cfg.get('curvature_checkpoint'),
             inverse_curvature_checkpoint=cfg.get('inverse_curvature_checkpoint'),
             device=cfg.get('device'),
-            curvature_device=cfg.get('curvature_device')
+            curvature_device=cfg.get('curvature_device'),
             save_gpu=cfg.get('save_gpu'),
             cfg=cfg,
         )
