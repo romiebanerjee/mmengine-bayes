@@ -491,7 +491,7 @@ class Runner:
         """
         print('Initiating KFAC object ...')
         
-        self.kfac = KFAC(model = self.model, device = self.kfac_device, load_from = self._load_from)
+        self.kfac = KFAC(model = self.model, device = self.kfac_device)
 
         '''Load kfac weights if provided'''
         if self.curvature_checkpoint:
