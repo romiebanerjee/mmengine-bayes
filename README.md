@@ -16,9 +16,16 @@ KFAC code adapted from [https://github.com/DLR-RM/curvature](https://github.com/
 ## Installation
 
 ```bash
+pip install -U openmim
+mim install mmcv
+
 git clone https://github.com/romiebanerjee/mmengine-bayes
-cd mmengine-bayes
-pip install -e .
+pip install -e mmengine-bayes/.
+```
+```python 
+import sys
+sys.path.append('/path/to/mmengine-bayes')
+import mmcv, mmengine
 ```
 
 ## Usage

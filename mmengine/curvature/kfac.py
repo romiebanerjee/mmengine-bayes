@@ -87,6 +87,7 @@ class KFAC(ABC):
 
     def sample_and_replace(self,
                         eps: float,
+                        eigen_index: int,
                         ):
         """Samples new model parameters and replaces old ones for selected layers, skipping all others."""
         self.model.load_state_dict(self.model_state)
@@ -94,6 +95,13 @@ class KFAC(ABC):
             if layer.__class__.__name__ in self.layer_types:
                 if layer.__class__.__name__ in ['Linear', 'Conv2d']:
                     if name in self.fisher.keys():
+
+                        if eigen_index is not None:
+                            assert self.eigvals and self.eigvecs, "Eigenspectrum not calculated yet"
+                            _sample = self.sample_eigen(name, eigen_index)
+                        else:
+                            _sample = self.sample(name)
+
                         _sample = self.sample(name)
                         if eps is not None:
                             _sample*= eps
