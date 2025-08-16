@@ -589,21 +589,26 @@ class FisherLoop(BaseLoop):
             self.run_iter(data_batch)
 
             #log progress and save kfac dictionary iterations
-            if self._iter%50 == 0:
+            if self._iter%10 == 0:
                 print('KFAC estimation: iter = ', self._iter, '/', self._max_iters)
 
-                filename = "kfac_state_iter_latest.pkl"
+                filename = "kfac_state_iter_latest.pt"
                 filepath = os.path.join(self.runner.work_dir, filename)
         
-                with open(filepath, 'wb') as f:
-                    pickle.dump(self.runner.kfac.state, f)
+                # with open(filepath, 'wb') as f:
+                #     pickle.dump(self.runner.kfac.state, f)
+
+                torch.save(self.runner.kfac.fisher, filepath)
 
             if self._iter%kfac_save_interval==0:
-                iter_filename = "kfac_state_iter_{}.pkl".format(self._iter)
+                iter_filename = "kfac_state_iter_{}.pt".format(self._iter)
                 iter_filepath = os.path.join(self.runner.work_dir, iter_filename)
 
-                with open(iter_filepath, 'wb') as f:
-                    pickle.dump(self.runner.kfac.state, f)
+                # with open(iter_filepath, 'wb') as f:
+                #     pickle.dump(self.runner.kfac.state, f)
+
+                torch.save(self.runner.kfac.fisher, filepath)    
+
                 print("saved kfac dict to " + iter_filepath)
 
 
