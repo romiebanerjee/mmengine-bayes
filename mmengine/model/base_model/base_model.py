@@ -144,6 +144,21 @@ class BaseModel(BaseModule):
         data = self.data_preprocessor(data, False)
         return self._run_forward(data, mode='predict')  # type: ignore
 
+    def fisher_step(self, data: Union[dict, tuple, list],
+                   optim_wrapper: OptimWrapper) -> Dict[str, torch.Tensor]:
+                   
+        """Implements the default model training process including
+        preprocessing, model forward propagation, loss calculation,
+        and back-propagation."""
+
+        with optim_wrapper.optim_context(self):
+            data = self.data_preprocessor(data, True)
+            losses = self._run_forward(data, mode='loss')  # type: ignore
+        parsed_losses, log_vars = self.parse_losses(losses)  # type: ignore
+
+        optim_wrapper.update_fisher(parsed_losses)
+        return log_vars
+
     def parse_losses(
         self, losses: Dict[str, torch.Tensor]
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
