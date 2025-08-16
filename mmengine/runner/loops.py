@@ -625,7 +625,7 @@ class FisherLoop(BaseLoop):
         outputs = self.runner.model.fisher_step(
             data_batch, optim_wrapper=self.runner.optim_wrapper)
 
-        self.runner.kfac.update(log=False)
+        self.runner.kfac.update_fisher(log=False)
      
 
         self.runner.call_hook(
