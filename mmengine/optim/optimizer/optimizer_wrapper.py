@@ -409,3 +409,25 @@ class OptimWrapper(BaseOptimWrapper):
                         'optimizer: \n')
         optimizer_str = repr(self.optimizer) + '\n'
         return wrapper_info + optimizer_str
+    
+    def update_fisher(self,
+            loss: torch.Tensor,
+            zero_kwargs: Optional[Dict] = None) -> None:
+
+        """Update  entries in KFAC fisher information matrix :attr:`optimizer`.
+
+        Args:
+            loss (torch.Tensor): A tensor for back propagation.
+            step_kwargs (dict): Arguments for optimizer.step.
+                Defaults to None.
+                New in version v0.4.0.
+            zero_kwargs (dict): Arguments for optimizer.zero_grad.
+                Defaults to None.
+                New in version v0.4.0.
+        """
+        if zero_kwargs is None:
+            zero_kwargs = {}
+        self.zero_grad(**zero_kwargs)
+        
+        loss = self.scale_loss(loss)
+        self.backward(loss)
