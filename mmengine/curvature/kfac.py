@@ -48,8 +48,6 @@ class KFAC(ABC):
         self.hooks = list()
         self.record = dict()
         self.grad = dict()
- 
-        self.eigenspectrum = dict()
 
 
         for layer in model.modules():
@@ -70,7 +68,7 @@ class KFAC(ABC):
     @staticmethod
     def _replace(sample: Tensor,
                  weight: Tensor,
-                 bias: Tensor = None):
+                 bias: Tensor):
         """Modifies current model parameters by adding/subtracting quantity given in `sample`.
 
         Args:
