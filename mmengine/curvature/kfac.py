@@ -51,7 +51,6 @@ class KFAC(ABC):
  
         self.eigenspectrum = dict()
 
-        self.state = dict()
 
         for layer in model.modules():
             if layer.__class__.__name__ in self.layer_types:
@@ -79,10 +78,10 @@ class KFAC(ABC):
             weight: The weights of one model layer.
             bias: The bias of one model layer. Optional.
         """
-        # if bias is not None:
-        #     bias_sample = sample[:, -1].contiguous().view(*bias.shape)
-        #     bias.data.add_(bias_sample)
-        #     sample = sample[:, :-1]
+        if bias is not None:
+            bias_sample = sample[:, -1].contiguous().view(*bias.shape)
+            bias.data.add_(bias_sample)
+            sample = sample[:, :-1]
         weight.data.add_(sample.contiguous().view(*weight.shape))
 
     def sample_and_replace(self,
