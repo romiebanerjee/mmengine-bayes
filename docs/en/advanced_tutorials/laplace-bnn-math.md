@@ -10,7 +10,7 @@ A **Bayesian neural network (BNN)** is an infinite family of neural networks, pa
 ### BNN Inference
 - Given the model $\Theta$ (space of NN weights) and prior distribution $P(\Theta)$
 - training data $D$
-- The posterior distribution $P(\Theta |D)$, estimated by approximations (monte carlo, variational infernce etc.). 
+- The posterior distribution $P(\Theta |D)$, estimated by approximations (monte carlo, variational inference etc.). 
 - The BNN predictive is the output distribution on $Y$, defined as the push-forward prob measure on $\Theta$, via the map $f(x, -): \Theta \to Y$. 
 
 ```mermaid
